@@ -1,77 +1,78 @@
-#
-# Variant calling workflow adapted from the Biostar Handbook.
-#
-
-# Accession number of the Ebola (Mayinga, 1976) genome.
-ACC=GCA_000848505
-
-# Reference and annotation files (downloaded by toolbox).
-REF=refs/ebola-1976.fa
-GFF=refs/ebola-1976.gff
-
-# Default SRR and sample alias.
-SRR=SRR1553425
-SAMPLE=EM110
-
-# Limit reads for a quick demo (increase for full analysis).
-N=5000
-
-# Paths for output.
-R1=reads/$(SAMPLE)_1.fastq
-R2=reads/$(SAMPLE)_2.fastq
-BAM=bam/$(SAMPLE).bam
-VCF=vcf/$(SAMPLE).vcf.gz
-
-# Make hygiene.
+.RECIPEPREFIX := >
 SHELL := bash
-.ONESHELL:
-.SHELLFLAGS := -eu -o pipefail -c
-.DELETE_ON_ERROR:
-MAKEFLAGS += --warn-undefined-variables
-MAKEFLAGS += --no-builtin-rules
+
+# --- Settings ---
+REF_DIR := refs
+REF := $(REF_DIR)/ebola-1976.fa
+
+# Default dataset (matches assignment)
+SRR := SRR1553425
+SAMPLE := EM110
+
+READS_DIR := reads
+R1 := $(READS_DIR)/$(SRR)_1.fastq
+R2 := $(READS_DIR)/$(SRR)_2.fastq
+
+BAM_DIR := bam
+BAM := $(BAM_DIR)/$(SAMPLE).bam
+
+VCF_DIR := vcf
+VCF := $(VCF_DIR)/$(SAMPLE).vcf.gz
 
 usage:
-\t@echo '# SNP call demonstration'
-\t@echo '# ACC=$(ACC)'
-\t@echo '# SRR=$(SRR)'
-\t@echo '# SAMPLE=$(SAMPLE)'
-\t@echo '# BAM=$(BAM)'
-\t@echo '# VCF=$(VCF)'
-\t@echo '#'
-\t@echo '# make bam      # reference, index, download reads, align -> BAM'
-\t@echo '# make vcf      # call variants with bcftools -> VCF.GZ'
-\t@echo '# make all      # run both'
-\t@echo '# make clean    # remove generated files'
-\t@echo '#'
-\t@echo '# Override defaults: make SRR=SRR1553428 SAMPLE=EM111 all'
+> @echo "# Standalone SNP call demo"
+> @echo "# SRR=$(SRR)"
+> @echo "# SAMPLE=$(SAMPLE)"
+> @echo "# REF=$(REF)"
+> @echo "# BAM=$(BAM)"
+> @echo "# VCF=$(VCF)"
+> @echo "#"
+> @echo "# make all        # ref + reads + align + call"
+> @echo "# make bam        # stop after BAM"
+> @echo "# make vcf        # call variants (after BAM)"
+> @echo "# Override: make SRR=SRR1553428 SAMPLE=EM111 all"
 
-# Check toolbox.
-CHECK_FILE := src/run/genbank.mk
-$(CHECK_FILE):
-\t@echo '# Please install Biostar Toolbox with: bio code'
-\t@exit 1
+# --- Reference (Ebola Mayinga, 1976) ---
+$(REF):
+> mkdir -p $(REF_DIR)
+> echo "# Downloading Ebola reference (AF086833.2) FASTA ..."
+> curl -L "https://www.ncbi.nlm.nih.gov/sviewer/viewer.fcgi?id=AF086833.2&db=nuccore&report=fasta" -o $(REF)
+> test -s $(REF)
+> echo "# Indexing reference ..."
+> bwa index $(REF)
+> samtools faidx $(REF)
 
-# BAM creation.
-bam: $(CHECK_FILE)
-\t# Get reference genome & annotations
-\tmake -f src/run/datasets.mk ACC=$(ACC) REF=$(REF) GFF=$(GFF) run
-\t# Index reference
-\tmake -f src/run/bwa.mk REF=$(REF) index
-\t# Download reads
-\tmake -f src/run/sra.mk SRR=$(SRR) R1=$(R1) R2=$(R2) N=$(N) run
-\t# Align reads with readgroup sample name
-\tmake -f src/run/bwa.mk SM=$(SAMPLE) REF=$(REF) R1=$(R1) R2=$(R2) BAM=$(BAM) run stats
+# --- Reads (SRA) ---
+$(R1) $(R2):
+> mkdir -p $(READS_DIR)
+> echo "# Fetching $(SRR) with fasterq-dump ..."
+> prefetch $(SRR) || true
+> fasterq-dump --split-files -O $(READS_DIR) $(SRR)
+> test -s $(R1) && test -s $(R2)
 
-# VCF calling.
-vcf:
-\tmake -f src/run/bcftools.mk REF=$(REF) BAM=$(BAM) VCF=$(VCF) run
+# --- Alignment (BAM) ---
+$(BAM): $(REF) $(R1) $(R2)
+> mkdir -p $(BAM_DIR)
+> echo "# Aligning with BWA-MEM ..."
+> bwa mem -t 2 -R "@RG\tID:$(SAMPLE)\tSM:$(SAMPLE)" $(REF) $(R1) $(R2) \
+>   | samtools sort -@ 2 -o $(BAM) -
+> samtools index $(BAM)
 
-# Both.
-all: bam vcf
+bam: $(BAM)
 
-# Clean.
+# --- Variant calling (VCF) ---
+$(VCF): $(BAM)
+> mkdir -p $(VCF_DIR)
+> echo "# Calling variants with bcftools ..."
+> bcftools mpileup -Ou -f $(REF) $(BAM) \
+>   | bcftools call -mv -Oz -o $(VCF)
+> bcftools index -t $(VCF)
+
+vcf: $(VCF)
+
+all: $(VCF)
+
 clean:
-\trm -rf ncbi_dataset/data/$(ACC)
-\trm -rf $(REF) $(GFF) $(R1) $(R2) $(BAM) $(VCF) vcf/merged.vcf.gz vcf/merged.vcf.gz.tbi
+> rm -rf $(REF_DIR) $(READS_DIR) $(BAM_DIR) $(VCF_DIR) ncbi/public/sra
 
-.PHONY: bam vcf all usage clean
+.PHONY: usage bam vcf all clean
